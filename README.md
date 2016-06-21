@@ -6,10 +6,10 @@ RIPster advertises static or Docker Ipvlan L3 routes from the end-host, using th
 
 ## Download
 
-[Linux (32 bit)](https://github.com/jamsix/RIPster/raw/master/bin/ripster-linux-386)
-[Linux (64 bit)](https://github.com/jamsix/RIPster/raw/master/bin/ripster-linux-amd64)
-[macOS](https://github.com/jamsix/RIPster/raw/master/bin/ripster-windows)
-[Windows](https://github.com/jamsix/RIPster/raw/master/bin/ripster-windows)
+* [Linux (32 bit)](https://github.com/jamsix/RIPster/raw/master/bin/ripster-linux-386)
+* [Linux (64 bit)](https://github.com/jamsix/RIPster/raw/master/bin/ripster-linux-amd64)
+* [macOS](https://github.com/jamsix/RIPster/raw/master/bin/ripster-windows)
+* [Windows](https://github.com/jamsix/RIPster/raw/master/bin/ripster-windows)
 
 ## Usage
 
@@ -17,7 +17,8 @@ RIPster must run with sufficient permissions to bind on UDP port 520. If unsure,
 
 ### Advertise static routes
 
-```$ sudo ./ripster --static-routes=7.7.0.0/16
+```
+$ sudo ./ripster --static-routes=7.7.0.0/16
 2016-06-21 21:39:12  INFO   Adding 7.7.0.0/16 from 10.0.0.100 (static)
 2016-06-21 21:39:12  INFO   RIP triggered update
 2016-06-21 21:39:12  INFO   RIP advertising from 10.0.0.100: 7.7.0.0/16 (1)
@@ -27,7 +28,8 @@ RIPster must run with sufficient permissions to bind on UDP port 520. If unsure,
 
 RIPster can advertise Docker [ipvlan network driver](https://github.com/docker/docker/blob/master/experimental/vlan-networks.md) routes, when ipvlan network is in L3 mode. You should run RIPster on Docker host. RIPster then queries Docker API to fetch the list of all ipvlan networks. RIPster then advertises all ipvlan networks and all running containers with an IP address in in ipvlan network from the ipvlan parent interface.
 
-```$ sudo ./ripster --docker-ipvlan
+```
+$ sudo ./ripster --docker-ipvlan
 2016-06-21 22:03:06  INFO   Adding 10.50.10.0/24 from 10.0.0.100  (Docker Ipvlan L3)
 2016-06-21 22:03:06  INFO   Adding 10.50.10.2/32 from 10.0.0.100  (Docker Ipvlan L3)
 2016-06-21 22:03:06  INFO   RIP triggered update
@@ -36,6 +38,7 @@ RIPster can advertise Docker [ipvlan network driver](https://github.com/docker/d
 
 ### More Options
 
-```$ sudo ./ripster -h
+```
+$ sudo ./ripster -h
 ```
 
