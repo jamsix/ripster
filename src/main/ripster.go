@@ -1,25 +1,25 @@
 package main
 
 import (
-	"ripster"
-	"time"
-	"fmt"
 	"flag"
+	"fmt"
 	"net"
-	"strings"
-	"runtime"
 	"os"
 	"os/signal"
+	"ripster"
+	"runtime"
+	"strings"
 	"syscall"
+	"time"
 )
 
 const (
-	Ver		= "0.2"
-	LogDebug = 4
-	LogInfo = 3
+	Ver        = "0.3"
+	LogDebug   = 4
+	LogInfo    = 3
 	LogWarning = 2
-	LogError = 1
-	LogNone = 0
+	LogError   = 1
+	LogNone    = 0
 )
 
 var logLevel uint
@@ -58,13 +58,18 @@ func main() {
 	if *staticRoutesString != "" {
 		staticRoutesStringSlice := strings.Split(strings.Replace(*staticRoutesString, " ", "", -1), ",")
 		for _, route := range staticRoutesStringSlice {
+			if strings.Index(route, "/") == -1 {
+				if strings.Index(route, ".") > 0 {
+					route = route + "/32"
+				} else if strings.Index(route, ":") > 0 {
+					route = route + "/128"
+				}
+			}
 			ip, ipNet, err := net.ParseCIDR(route)
-			if ip.To4() == nil {
-				l.Error("Static route configuration: %s is not an IPv4 address", ip.String())
-			} else if err == nil {
-				staticRoutes = append(staticRoutes, *ipNet)
+			if err != nil {
+				l.Error("Static route configuration: %s is not an IP address", ip.String())
 			} else {
-				l.Error("Static route configuration: %s", err.Error())
+				staticRoutes = append(staticRoutes, *ipNet)
 			}
 		}
 	}
@@ -73,15 +78,17 @@ func main() {
 		staticSourcesStringSlice := strings.Split(strings.Replace(*staticSourcesString, " ", "", -1), ",")
 		for _, sourceNetwork := range staticSourcesStringSlice {
 			if strings.Index(sourceNetwork, "/") == -1 {
-				sourceNetwork = sourceNetwork + "/32"
+				if strings.Index(sourceNetwork, ".") > 0 {
+					sourceNetwork = sourceNetwork + "/32"
+				} else if strings.Index(sourceNetwork, ":") > 0 {
+					sourceNetwork = sourceNetwork + "/128"
+				}
 			}
 			ip, ipNet, err := net.ParseCIDR(sourceNetwork)
-			if ip.To4() == nil {
-				l.Error("Static source configuration: %s is not an IPv4 address/network", ip.String())
-			} else if err == nil {
-				staticSources = append(staticSources, *ipNet)
+			if err == nil {
+				l.Error("Static source configuration: %s is not an IP address/network", ip.String())
 			} else {
-				l.Error("Static source configuration: %s", err.Error())
+				staticSources = append(staticSources, *ipNet)
 			}
 		}
 	}
@@ -90,15 +97,17 @@ func main() {
 		staticSourcesExcludedStringSlice := strings.Split(strings.Replace(*staticSourcesExcludedString, " ", "", -1), ",")
 		for _, sourceNetwork := range staticSourcesExcludedStringSlice {
 			if strings.Index(sourceNetwork, "/") == -1 {
-				sourceNetwork = sourceNetwork + "/32"
+				if strings.Index(sourceNetwork, ".") > 0 {
+					sourceNetwork = sourceNetwork + "/32"
+				} else if strings.Index(sourceNetwork, ":") > 0 {
+					sourceNetwork = sourceNetwork + "/128"
+				}
 			}
 			ip, ipNet, err := net.ParseCIDR(sourceNetwork)
-			if ip.To4() == nil {
-				l.Error("Static source exclude configuration: %s is not an IPv4 address/network", ip.String())
-			} else if err == nil {
-				staticSourcesExcluded = append(staticSourcesExcluded, *ipNet)
+			if err == nil {
+				l.Error("Static source exclude configuration: %s is not an IP address/network", ip.String())
 			} else {
-				l.Error("Static source exclude configuration: %s", err.Error())
+				staticSourcesExcluded = append(staticSourcesExcluded, *ipNet)
 			}
 		}
 	}
@@ -109,17 +118,27 @@ func main() {
 		logLevel = 3
 	}
 
+	var routers []ripster.RouterInterface
+
+	// Gentlemen, start your Routers
 	ripv2, _ := ripster.NewRIPv2()
+	routers = append(routers, ripv2)
 	ripv2.SetTimers(float32(*ripUpdateTimer), float32(*ripUpdateDelay), float32(*ripGCTimer))
 	ripv2.LogLevel = logLevel
 	go handleLogs(ripv2)
 
+	ripng, _ := ripster.NewRIPng()
+	routers = append(routers, ripng)
+	ripng.SetTimers(float32(*ripUpdateTimer), float32(*ripUpdateDelay), float32(*ripGCTimer))
+	ripng.LogLevel = logLevel
+	go handleLogs(ripng)
+
 	// Gentlemen, start your Collectors
 	if len(staticRoutes) > 0 {
-		go addStaticRoutes(ripv2, staticRoutes, staticSources, staticSourcesExcluded)
+		go addStaticRoutes(routers, staticRoutes, staticSources, staticSourcesExcluded)
 	}
 	if *dockerIpvlanEnable {
-		dockerIpvlanCollector, _ := ripster.NewDockerIpvlanCollector(ripv2)
+		dockerIpvlanCollector, _ := ripster.NewDockerIpvlanCollector(routers)
 		dockerIpvlanCollector.SetTimers(float32(*dockerIpvlanRefresh))
 		dockerIpvlanCollector.LogLevel = logLevel
 		go handleLogs(dockerIpvlanCollector)
@@ -133,12 +152,16 @@ func main() {
 		case syscall.SIGINT, syscall.SIGTERM:
 			if *ripDeclareUnreachableOnQuit == true {
 				l.Info("SIGINT/SIGTERM received. Declaring all routes unreachable, than quitting.")
-				ripv2.KeepRoutesUponClosure = false
-				ripv2.Close()
+				for _, router := range routers {
+					router.KeepRoutesUponClosure(false)
+					router.Close()
+				}
 			} else {
 				l.Info("SIGINT/SIGTERM received. Quitting.")
-				ripv2.KeepRoutesUponClosure = true
-				ripv2.Close()
+				for _, router := range routers {
+					router.KeepRoutesUponClosure(true)
+					router.Close()
+				}
 			}
 			os.Exit(0)
 		case syscall.SIGHUP:
@@ -150,7 +173,7 @@ func main() {
 
 // Runs in it's own Goroutine
 // Adds preconfigured static routes routers
-func addStaticRoutes(ripv2 *ripster.RIPv2, staticRoutes []net.IPNet, staticSources []net.IPNet, staticSourcesExcluded []net.IPNet) {
+func addStaticRoutes(routers []ripster.RouterInterface, staticRoutes []net.IPNet, staticSources []net.IPNet, staticSourcesExcluded []net.IPNet) {
 
 	var parentIPs []net.IP
 
@@ -192,25 +215,27 @@ func addStaticRoutes(ripv2 *ripster.RIPv2, staticRoutes []net.IPNet, staticSourc
 
 	for _, _ = range parentIPs {
 		for _, route := range staticRoutes {
-			err := ripv2.AddRoute(ripster.Route{Route:route.String(), AdministrativeDistance:ripster.AdministrativeDistanceStatic})
-			if err != nil {
-				l.Error(err.Error())
-			} else {
-				l.Debug("Adding %s (static)", route.String())
+			for _, router := range routers {
+				err := router.AddRoute(ripster.Route{Route: route.String(), AdministrativeDistance: ripster.AdministrativeDistanceStatic})
+				if err != nil {
+					l.Error("Static: %s", err.Error())
+				} else {
+					l.Debug("Adding %s (static)", route.String())
+				}
 			}
 		}
 	}
 
 }
 
-func handleLogs (logGenerator ripster.LogGeneratorInterface) {
+func handleLogs(logGenerator ripster.LogGeneratorInterface) {
 	for {
 		logChan := logGenerator.LogChan()
 		msg, channelOpen := <-*logChan
 		if !channelOpen {
 			return
 		}
-		fmt.Printf(time.Now().Format("2006-01-02 15:04:05 ")+msg)
+		fmt.Printf(time.Now().Format("2006-01-02 15:04:05 ") + msg)
 	}
 }
 

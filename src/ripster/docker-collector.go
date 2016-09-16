@@ -1,27 +1,27 @@
 package ripster
 
 import (
+	"bufio"
 	"bytes"
+	"encoding/json"
+	"errors"
+	"fmt"
 	"net"
 	"strings"
 	"time"
-	"errors"
-	"fmt"
-	"encoding/json"
-	"bufio"
 )
 
 type DockerIpvlanCollector struct {
 	LogLevel uint
 	// Log channel, all collector logs will be sent to this channel
-	Log chan string
+	Log     chan string
 	enabled bool
 	// Setings
 	updateTimer time.Duration
 	// RIP fields
 	routeTable map[string]map[string]DockerIpvlanCollectorRoute
 	// Routers that are updated with routes
-	router RouterInterface
+	routers []RouterInterface
 }
 
 type DockerIpvlanCollectorRoute struct {
@@ -33,14 +33,13 @@ type DockerIpvlanCollectorRoute struct {
 const (
 	// Default RIP settings
 	DockerIpvlanCollectorDefaultUpdateTimer = 1.0  // in seconds
-	DockerIpvlanCollectorMinUpdateTimer = 0.01 // in seconds
-	DockerIpvlanCollectorMaxUpdateTimer = 60.0 // in seconds
+	DockerIpvlanCollectorMinUpdateTimer     = 0.01 // in seconds
+	DockerIpvlanCollectorMaxUpdateTimer     = 60.0 // in seconds
 )
 
 var dockerIpvlanCollector DockerIpvlanCollector
 
-
-func NewDockerIpvlanCollector(router RouterInterface) (*DockerIpvlanCollector, error) {
+func NewDockerIpvlanCollector(routers []RouterInterface) (*DockerIpvlanCollector, error) {
 
 	// There can be only one DockerIpvlanCollector instance
 	if dockerIpvlanCollector.enabled == true {
@@ -53,7 +52,7 @@ func NewDockerIpvlanCollector(router RouterInterface) (*DockerIpvlanCollector, e
 
 	dockerIpvlanCollector.Log = make(chan string, 100)
 
-	dockerIpvlanCollector.router = router
+	dockerIpvlanCollector.routers = routers
 
 	go dockerIpvlanCollector.collector()
 
@@ -61,8 +60,7 @@ func NewDockerIpvlanCollector(router RouterInterface) (*DockerIpvlanCollector, e
 
 }
 
-
-func (DockerIpvlanCollector *DockerIpvlanCollector) SetTimers(update float32) error {
+func (dic *DockerIpvlanCollector) SetTimers(update float32) error {
 
 	if update < DockerIpvlanCollectorMinUpdateTimer || update > DockerIpvlanCollectorMaxUpdateTimer {
 		return errors.New(fmt.Sprintf("Docker Ipvlan L3 Collector update timer should be between %.f and %.f", DockerIpvlanCollectorMinUpdateTimer, DockerIpvlanCollectorMaxUpdateTimer))
@@ -74,112 +72,115 @@ func (DockerIpvlanCollector *DockerIpvlanCollector) SetTimers(update float32) er
 
 }
 
-func (DockerIpvlanCollector *DockerIpvlanCollector) AddRoute(route DockerIpvlanCollectorRoute) {
+func (dic *DockerIpvlanCollector) AddRoute(route DockerIpvlanCollectorRoute) {
 
 	parentIPStr := route.ParentIP.String()
 	routeStr := route.Route.String()
 
-		if _, exists := DockerIpvlanCollector.routeTable[parentIPStr]; !exists {
-				DockerIpvlanCollector.routeTable[parentIPStr] = make(map[string]DockerIpvlanCollectorRoute)
-		}
-		if _, exists := DockerIpvlanCollector.routeTable[parentIPStr][routeStr]; exists {
-			DockerIpvlanCollector.logDebug("Docker Ipvlan L3 Collector adding %s from %s, but it already exists?", routeStr, parentIPStr)
-		}
-		DockerIpvlanCollector.routeTable[parentIPStr][routeStr] = route
-		DockerIpvlanCollector.logDebug("Docker Ipvlan L3 Collector adding %s from %s", routeStr, parentIPStr)
+	if _, exists := dic.routeTable[parentIPStr]; !exists {
+		dic.routeTable[parentIPStr] = make(map[string]DockerIpvlanCollectorRoute)
+	}
+	if _, exists := dic.routeTable[parentIPStr][routeStr]; exists {
+		dic.logDebug("Docker Ipvlan L3 Collector adding %s from %s, but it already exists?", routeStr, parentIPStr)
+	}
+	dic.routeTable[parentIPStr][routeStr] = route
+	dic.logDebug("Docker Ipvlan L3 Collector adding %s from %s", routeStr, parentIPStr)
 
-		err := DockerIpvlanCollector.router.AddRoute(Route{Route:route.Route.String(), NextHop:route.ParentIP.String(), Metric:1, AdministrativeDistance:AdministrativeDistanceDockerL3})
+	for i, _ := range dic.routers {
+		err := dic.routers[i].AddRoute(Route{Route: route.Route.String(), NextHop: route.ParentIP.String(), Metric: 1, AdministrativeDistance: AdministrativeDistanceDockerL3})
 		if err != nil {
-			DockerIpvlanCollector.logError("Docker Ipvlan L3 Collector error: %s", err.Error())
+			dic.logDebug("Docker Ipvlan L3 Collector add route: %s", err.Error())
 		}
+	}
 
 }
 
-func (DockerIpvlanCollector *DockerIpvlanCollector) RemoveRoute(route DockerIpvlanCollectorRoute) {
+func (dic *DockerIpvlanCollector) RemoveRoute(route DockerIpvlanCollectorRoute) {
 
-		parentIPStr := route.ParentIP.String()
-		routeStr := route.Route.String()
+	parentIPStr := route.ParentIP.String()
+	routeStr := route.Route.String()
 
-		if _, exists := DockerIpvlanCollector.routeTable[parentIPStr]; !exists {
-				DockerIpvlanCollector.logDebug("Docker Ipvlan L3 Collector removing %s from %s, but %s does not exist?", routeStr, parentIPStr, parentIPStr)
-		}
-		if _, exists := DockerIpvlanCollector.routeTable[parentIPStr][routeStr]; !exists {
-			DockerIpvlanCollector.logDebug("Docker Ipvlan L3 Collector removing %s from %s, but %s does not exist?", routeStr, parentIPStr, routeStr)
-		}
-		delete(DockerIpvlanCollector.routeTable[parentIPStr], routeStr)
-		DockerIpvlanCollector.logDebug("Docker Ipvlan L3 Collector removing %s from %s", routeStr, parentIPStr)
+	if _, exists := dic.routeTable[parentIPStr]; !exists {
+		dic.logDebug("Docker Ipvlan L3 Collector removing %s from %s, but %s does not exist?", routeStr, parentIPStr, parentIPStr)
+	}
+	if _, exists := dic.routeTable[parentIPStr][routeStr]; !exists {
+		dic.logDebug("Docker Ipvlan L3 Collector removing %s from %s, but %s does not exist?", routeStr, parentIPStr, routeStr)
+	}
+	delete(dic.routeTable[parentIPStr], routeStr)
+	dic.logDebug("Docker Ipvlan L3 Collector removing %s from %s", routeStr, parentIPStr)
 
-		err := DockerIpvlanCollector.router.RemoveRoute(Route{Route:route.Route.String(), NextHop:route.ParentIP.String(), AdministrativeDistance:AdministrativeDistanceDockerL3})
+	for i, _ := range dic.routers {
+		err := dic.routers[i].RemoveRoute(Route{Route: route.Route.String(), NextHop: route.ParentIP.String(), AdministrativeDistance: AdministrativeDistanceDockerL3})
 		if err != nil {
-			DockerIpvlanCollector.logError("Docker Ipvlan L3 Collector error: %s", err.Error())
+			dic.logDebug("Docker Ipvlan L3 Collector remove route: %s", err.Error())
 		}
+	}
 
 }
 
-func (DockerIpvlanCollector *DockerIpvlanCollector) Close() {
+func (dic *DockerIpvlanCollector) Close() {
 
-	DockerIpvlanCollector.enabled = false
-	DockerIpvlanCollector.routeTable = make(map[string]map[string]DockerIpvlanCollectorRoute)
+	dic.enabled = false
+	dic.routeTable = make(map[string]map[string]DockerIpvlanCollectorRoute)
 
 }
 
-func (DockerIpvlanCollector *DockerIpvlanCollector) LogChan() *chan string {
-	return &DockerIpvlanCollector.Log
+func (dic *DockerIpvlanCollector) LogChan() *chan string {
+	return &dic.Log
 }
 
+func (dic *DockerIpvlanCollector) collector() {
 
-func (DockerIpvlanCollector *DockerIpvlanCollector) collector() {
-
-	DockerIpvlanCollector.logInfo("Docker Ipvlan L3 Collector starting")
+	dic.logInfo("Docker Ipvlan L3 Collector starting")
 
 	for {
-		if DockerIpvlanCollector.enabled == false {
+		if dic.enabled == false {
 			return
 		}
 		startTime := time.Now()
 
-		latestRouteEntries, err := DockerIpvlanCollector.getDockerIpvlanL3Networks()
+		latestRouteEntries, err := dic.getDockerIpvlanL3Networks()
 		if err != nil {
-			DockerIpvlanCollector.logError(err.Error())
-			time.Sleep(DockerIpvlanCollector.updateTimer - time.Since(startTime))
+			dic.logError(err.Error())
+			time.Sleep(dic.updateTimer - time.Since(startTime))
 			continue
 		}
 
-		// Latest routes, that are not yet in DockerIpvlanCollector.routeTable must be
+		// Latest routes, that are not yet in dic.routeTable must be
 		// added
 		var routeMustBeAdded bool
 		for parentIpStr, routes := range latestRouteEntries {
 			routeMustBeAdded = false
-			if _, exists := DockerIpvlanCollector.routeTable[parentIpStr]; !exists {
+			if _, exists := dic.routeTable[parentIpStr]; !exists {
 				routeMustBeAdded = true
 			}
 			for routeStr, route := range routes {
 				if routeMustBeAdded == true {
-					DockerIpvlanCollector.AddRoute(route)
-				} else if _, exists := DockerIpvlanCollector.routeTable[parentIpStr][routeStr]; !exists {
-					DockerIpvlanCollector.AddRoute(route)
+					dic.AddRoute(route)
+				} else if _, exists := dic.routeTable[parentIpStr][routeStr]; !exists {
+					dic.AddRoute(route)
 				}
 			}
 		}
 
-		// Routes that are in DockerIpvlanCollector.routeTable, but are not the latest
+		// Routes that are in dic.routeTable, but are not the latest
 		// routes, must be removed
 		var routeMustBeRemoved bool
-		for parentIpStr, routes := range DockerIpvlanCollector.routeTable {
+		for parentIpStr, routes := range dic.routeTable {
 			routeMustBeRemoved = false
 			if _, exists := latestRouteEntries[parentIpStr]; !exists {
 				routeMustBeRemoved = true
 			}
 			for routeStr, route := range routes {
 				if routeMustBeRemoved == true {
-					DockerIpvlanCollector.RemoveRoute(route)
+					dic.RemoveRoute(route)
 				} else if _, exists := latestRouteEntries[parentIpStr][routeStr]; !exists {
-					DockerIpvlanCollector.RemoveRoute(route)
+					dic.RemoveRoute(route)
 				}
 			}
 		}
 
-		time.Sleep(DockerIpvlanCollector.updateTimer - time.Since(startTime))
+		time.Sleep(dic.updateTimer - time.Since(startTime))
 	}
 
 }
@@ -188,7 +189,7 @@ func (DockerIpvlanCollector *DockerIpvlanCollector) collector() {
 // the return map with parent interface IP addresses, ipvlan networks and
 // hosts with IP address in the ipvlan network
 // Returns routeTable, error
-func (DockerIpvlanCollector *DockerIpvlanCollector) getDockerIpvlanL3Networks() (map[string]map[string]DockerIpvlanCollectorRoute, error) {
+func (dic *DockerIpvlanCollector) getDockerIpvlanL3Networks() (map[string]map[string]DockerIpvlanCollectorRoute, error) {
 
 	conn, err := net.Dial("unix", "/var/run/docker.sock")
 	if err != nil {
@@ -263,11 +264,9 @@ func (DockerIpvlanCollector *DockerIpvlanCollector) getDockerIpvlanL3Networks() 
 					for _, addr := range addrs {
 						ip, _, err := net.ParseCIDR(addr.String())
 						if err != nil {
-							DockerIpvlanCollector.logError("Docker Ipvlan L3 Collector parent interface error: %s", err.Error())
-						} else if ip.To4() == nil {
-							// This is not an IPv4 subnet
+							dic.logError("Docker Ipvlan L3 Collector parent interface error: %s", err.Error())
 						} else {
-							parentIPs = append(parentIPs, ip.To4())
+							parentIPs = append(parentIPs, ip)
 						}
 					}
 					break
@@ -275,17 +274,15 @@ func (DockerIpvlanCollector *DockerIpvlanCollector) getDockerIpvlanL3Networks() 
 			}
 
 			if len(parentIPs) == 0 {
-				DockerIpvlanCollector.logError("Docker Ipvlan L3 Collector sees no parent interfaces with valid IPv4 addresses")
+				dic.logError("Docker Ipvlan L3 Collector sees no parent interfaces with valid IP addresses")
 			}
 
 			// Ipvlan network has 0 or more IPAM subnets configured. These
 			// subnets will be advertised as routes.
 			for j := 0; j < len(networks[i].IPAM.Config); j++ {
-				ip, ipNet, err := net.ParseCIDR(networks[i].IPAM.Config[j].Subnet)
+				_, ipNet, err := net.ParseCIDR(networks[i].IPAM.Config[j].Subnet)
 				if err != nil {
-					DockerIpvlanCollector.logError("Docker Ipvlan L3 Collector IPAM network error: %s", err.Error())
-				} else if ip.To4() == nil {
-					// This is not an IPv4 subnet
+					dic.logError("Docker Ipvlan L3 Collector IPAM network error: %s", err.Error())
 				} else {
 					routes = append(routes, *ipNet)
 				}
@@ -299,13 +296,21 @@ func (DockerIpvlanCollector *DockerIpvlanCollector) getDockerIpvlanL3Networks() 
 				ipStr, _ := mp["IPv4Address"].(string)
 				ip, _, err := net.ParseCIDR(ipStr)
 				if err != nil {
-					DockerIpvlanCollector.logError("Docker Ipvlan L3 Collector container error: %s", err.Error())
-				} else if ip.To4() == nil {
-					// This is not an IPv4 subnet
+					dic.logError("Docker Ipvlan L3 Collector container error: %s", err.Error())
 				} else {
 					ipNet := new(net.IPNet)
-					ipNet.IP = ip.To4()
+					ipNet.IP = ip
 					ipNet.Mask = net.CIDRMask(32, 32)
+					routes = append(routes, *ipNet)
+				}
+				ipStr, _ = mp["IPv6Address"].(string)
+				ip, _, err = net.ParseCIDR(ipStr)
+				if err != nil {
+					dic.logError("Docker Ipvlan L3 Collector container error: %s", err.Error())
+				} else {
+					ipNet := new(net.IPNet)
+					ipNet.IP = ip
+					ipNet.Mask = net.CIDRMask(128, 128)
 					routes = append(routes, *ipNet)
 				}
 			}
@@ -329,7 +334,7 @@ func (DockerIpvlanCollector *DockerIpvlanCollector) getDockerIpvlanL3Networks() 
 
 }
 
-func (DockerIpvlanCollector DockerIpvlanCollector) isSameRoute(r1, r2 DockerIpvlanCollectorRoute) bool {
+func (dic DockerIpvlanCollector) isSameRoute(r1, r2 DockerIpvlanCollectorRoute) bool {
 	if (r1.Route.Contains(r2.Route.IP) || r2.Route.Contains(r1.Route.IP)) &&
 		bytes.Compare(r1.ParentIP.To16(), r2.ParentIP.To16()) == 0 {
 		return true
@@ -338,30 +343,30 @@ func (DockerIpvlanCollector DockerIpvlanCollector) isSameRoute(r1, r2 DockerIpvl
 	}
 }
 
-func (DockerIpvlanCollector *DockerIpvlanCollector) log(msg string) {
+func (dic *DockerIpvlanCollector) log(msg string) {
 	select {
-	case DockerIpvlanCollector.Log <- msg+"\n":
-  	default:
-  }
+	case dic.Log <- msg + "\n":
+	default:
+	}
 }
 
-func (DockerIpvlanCollector *DockerIpvlanCollector) logDebug(format string, a ...interface{}) {
-	if DockerIpvlanCollector.LogLevel >= LogDebug {
-		DockerIpvlanCollector.log(fmt.Sprintf("DEBUG "+format, a...))
+func (dic *DockerIpvlanCollector) logDebug(format string, a ...interface{}) {
+	if dic.LogLevel >= LogDebug {
+		dic.log(fmt.Sprintf("DEBUG "+format, a...))
 	}
 }
-func (DockerIpvlanCollector *DockerIpvlanCollector) logInfo(format string, a ...interface{}) {
-	if DockerIpvlanCollector.LogLevel >= LogInfo {
-		DockerIpvlanCollector.log(fmt.Sprintf("INFO  "+format, a...))
+func (dic *DockerIpvlanCollector) logInfo(format string, a ...interface{}) {
+	if dic.LogLevel >= LogInfo {
+		dic.log(fmt.Sprintf("INFO  "+format, a...))
 	}
 }
-func (DockerIpvlanCollector *DockerIpvlanCollector) logWarn(format string, a ...interface{}) {
-	if DockerIpvlanCollector.LogLevel >= LogWarning {
-		DockerIpvlanCollector.log(fmt.Sprintf("WARN  "+format, a...))
+func (dic *DockerIpvlanCollector) logWarn(format string, a ...interface{}) {
+	if dic.LogLevel >= LogWarning {
+		dic.log(fmt.Sprintf("WARN  "+format, a...))
 	}
 }
-func (DockerIpvlanCollector *DockerIpvlanCollector) logError(format string, a ...interface{}) {
-	if DockerIpvlanCollector.LogLevel >= LogError {
-		DockerIpvlanCollector.log(fmt.Sprintf("ERROR "+format, a...))
+func (dic *DockerIpvlanCollector) logError(format string, a ...interface{}) {
+	if dic.LogLevel >= LogError {
+		dic.log(fmt.Sprintf("ERROR "+format, a...))
 	}
 }

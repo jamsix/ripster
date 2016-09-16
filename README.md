@@ -1,8 +1,8 @@
 # RIPster
 _Super lightweight RIPv2 beacon_
 
-RIPster is a lightweight, easy to use, single binary Routing Information Protocol version 2 (RIPv2) client written in Go.
-RIPster advertises static or Docker Ipvlan L3 routes from the end-host, using the RIPv2 unsolicited routing update messages. RIPster does not receive RIP updates or alter the local routing table.
+RIPster is a lightweight, easy to use, single binary Routing Information Protocol version 2 (RIPv2) and next generation (RIPng) client written in Go.
+RIPster advertises static or Docker Ipvlan L3 routes from the end-host, using the RIP unsolicited routing update messages. RIPster does not receive RIP updates or alter the local routing table.
 
 ## Download
 
@@ -36,9 +36,14 @@ $ sudo ./ripster --docker-ipvlan
 2016-06-21 22:03:06  INFO   RIP advertising from 10.0.0.100 : 10.50.10.0/24 (1) 10.50.10.2/32 (1)
 ```
 
+### Run RIPster in the background
+
+```
+$ sudo ./ripster --docker-ipvlan > ripster.log &
+```
+
 ### More Options
 
 ```
 $ sudo ./ripster -h
 ```
-
